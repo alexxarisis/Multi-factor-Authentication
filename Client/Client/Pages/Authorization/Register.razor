@@ -1,0 +1,132 @@
+﻿@page "/register"
+@inject HttpClient http
+@inject NavigationManager navManager
+@inject Blazored.LocalStorage.ILocalStorageService localStorage
+@using System.Security.Claims
+
+<PageTitle>Register</PageTitle>
+
+<h1>Register</h1>
+
+<EditForm Model="@user" OnValidSubmit="RegisterUser">
+    <div class="form-group">
+        <label for="username">Username</label>
+        <InputText id="username" @bind-Value="user.UserName" class="form-control" />
+    </div>
+    <br />
+    <div class="form-group">
+        <label for="email">Email</label>
+        <InputText id="email" @bind-Value="user.Email" type="email" class="form-control" />
+    </div>
+    <br />
+    <div class="form-group">
+        <label for="password">Password</label>
+        <InputText id="password" @bind-Value="user.Password" type="password" class="form-control" />
+    </div>
+    <br />
+    <div class="form-group">
+        <label for="confirmPassword">Confirm password</label>
+        <InputText id="confirmPassword" @bind-Value="user.ConfirmPassword" type="password" class="form-control" />
+    </div>
+    <br />
+    <button type="submit" class="btn btn-primary" disabled=@isDisabled>Register</button>
+    <div>
+        <br />
+        <p>Already registered?</p>
+        <a href="/login" class="col-3">Login</a>
+    </div>
+</EditForm>
+
+<p role="status">@debugLog</p>
+
+@code {
+    [CascadingParameter]
+    public Task<AuthenticationState> AuthState { get; set; }
+
+    private RegistrationUser user = new RegistrationUser();
+    private bool isDisabled = false;
+    private string debugLog = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await base.OnInitializedAsync();
+        try
+        {
+            if (!await localStorage.ContainKeyAsync("Refresh"))
+            {
+                return;
+            }
+
+            string token = await localStorage.GetItemAsync<string>("Refresh");
+            http.DefaultRequestHeaders.Authorization = new("Bearer", token);
+            using var requestResult = await http.PostAsJsonAsync("auth/refresh", "");
+            if (requestResult.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                return;
+            }
+            var response = await requestResult.Content.ReadFromJsonAsync<Response>();
+            if (response == null)
+            {
+                throw new Exception("Null Response");
+            }
+
+            await StoreTokens(response);
+            await UpdateIdentity(response);
+            navManager.NavigateTo("/");
+        }
+        catch (Exception e)
+        {
+            isDisabled = false;
+            debugLog = e.ToString();
+        }
+    }
+
+    private async Task RegisterUser()
+    {
+        try
+        {
+            isDisabled = true;
+            using var requestResult = await http.PostAsJsonAsync("auth/register", user);
+            if (requestResult.StatusCode != System.Net.HttpStatusCode.Created)
+            {
+                debugLog = requestResult.StatusCode + "\n" +
+                    await requestResult.Content.ReadAsStringAsync();
+                throw new Exception(debugLog);
+            }
+
+            var response = await requestResult.Content.ReadFromJsonAsync<Response>();
+            if (response == null)
+            {
+                throw new Exception("Null Response");
+            }
+            await StoreTokens(response);
+            await UpdateIdentity(response);
+            await localStorage.SetItemAsync("username", user.UserName);
+            navManager.NavigateTo("/mfa/activate");
+        }
+        catch (Exception e)
+        {
+            isDisabled = false;
+            debugLog = e.ToString();
+        }
+    }
+
+    private async Task StoreTokens(Response response)
+    {
+        foreach (KeyValuePair<string, string> token in response.Tokens)
+        {
+            await localStorage.SetItemAsync(token.Key, token.Value);
+        }
+    }
+
+    private async Task UpdateIdentity(Response response)
+    {
+        var authState = await AuthState;
+        var identity = authState.User.Identity as ClaimsIdentity;
+
+        foreach (KeyValuePair<string, string> token in response.Tokens)
+        {
+            identity.AddClaim(new Claim(ClaimTypes.Role, token.Key));
+        }
+    }
+}

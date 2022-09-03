@@ -1,0 +1,62 @@
+﻿@page "/"
+@inject Blazored.LocalStorage.ILocalStorageService localStorage
+@inject NavigationManager navManager
+@using System.Security.Claims
+@attribute [Authorize (Roles = "Access")]
+
+<h2><b>Home</b></h2>
+<div class="p-4">
+	<div class="container">
+		<h5>Welcome, @username!</h5>
+		<p>
+			<br />
+			<br />
+			<i>You're currently logged in!</i>
+		</p>
+	</div>
+</div>
+
+<button type="submit" class="btn btn-primary" @onclick="LogOut" disabled=@isDisabled>Log Out</button>
+
+@code {
+	[CascadingParameter]
+	public Task<AuthenticationState> AuthState { get; set; }
+
+	private string username = "";
+	private bool isDisabled = false;
+
+	protected override async Task OnInitializedAsync()
+	{
+		await base.OnInitializedAsync();
+		username = await localStorage.GetItemAsync<string>("username");
+	}
+
+	private async Task LogOut(){
+		try {
+			isDisabled = true;
+			await RemoveIdentityClaims();
+			await ClearLocalStorage();
+			navManager.NavigateTo("/login");
+		}
+		catch (Exception e)
+		{
+			// dunno what
+			isDisabled = false;
+		}
+	}
+
+	private async Task RemoveIdentityClaims()
+	{
+		var authState = await AuthState;
+		var identity = authState.User.Identity as ClaimsIdentity;
+		foreach (var claim in identity.Claims.ToList())
+		{
+			identity.RemoveClaim(claim);
+		}
+	}
+
+	private async Task ClearLocalStorage()
+	{
+		await localStorage.ClearAsync();
+	}
+}

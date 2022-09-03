@@ -1,0 +1,95 @@
+﻿@page "/mfa/activate"
+@inject HttpClient http
+@inject NavigationManager navManager
+@inject Blazored.LocalStorage.ILocalStorageService localStorage
+@using System.Security.Claims
+
+@attribute [Authorize(Roles = "Access")]
+
+<div>
+    <h4>Keep your account secure</h4>
+    <p>
+        You have not activated two-step authentication.
+        <br />
+        Would you like to enable it?
+    </p>
+</div>
+<div class="button">
+
+    <div class="action_btn">
+        <button name="submit" class="action_btn submit" @onclick="InitializeMFA" disabled=@isDisabled><b>Activate Now</b></button>
+        <button name="submit" class="action_btn cancel" @onclick="Skip" disabled=@isDisabled>Skip</button>
+
+    </div>
+    <br />
+    <br />
+    <br />
+    <h5>Step 1 of 3</h5>
+
+</div>
+
+<p role="status">@debugLog</p>
+
+
+@code {
+    [CascadingParameter]
+    public Task<AuthenticationState> AuthState { get; set; }
+
+    private bool isDisabled = false;
+    private string debugLog = "";
+
+    private async Task InitializeMFA()
+    {
+        try
+        {
+            isDisabled = true;
+            string token = await localStorage.GetItemAsync<string>("Access");
+            http.DefaultRequestHeaders.Authorization = new("Bearer", token);
+            using var requestResult = await http.PostAsync("mfa/init", null);
+            if (requestResult.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                debugLog = requestResult.StatusCode + "\n" +
+                    await requestResult.Content.ReadAsStringAsync();
+                throw new Exception(debugLog);
+            }
+
+            var response = await requestResult.Content.ReadFromJsonAsync<Response>();
+            if (response == null)
+            {
+                throw new Exception("Null Response");
+            }
+            await StoreTokens(response);
+            await UpdateIdentity(response);
+            navManager.NavigateTo("/mfa/verify");
+        }
+        catch (Exception e)
+        {
+            isDisabled = false;
+            debugLog = e.ToString();
+        }
+    }
+
+    private async Task StoreTokens(Response response)
+    {
+        foreach (KeyValuePair<string, string> token in response.Tokens)
+        {
+            await localStorage.SetItemAsync(token.Key, token.Value);
+        }
+    }
+
+    private async Task UpdateIdentity(Response response)
+    {
+        var authState = await AuthState;
+        var identity = authState.User.Identity as ClaimsIdentity;
+
+        foreach (KeyValuePair<string, string> token in response.Tokens)
+        {
+            identity.AddClaim(new Claim(ClaimTypes.Role, token.Key));
+        }
+    }
+
+    private void Skip()
+    {
+        navManager.NavigateTo("/");
+    }
+}

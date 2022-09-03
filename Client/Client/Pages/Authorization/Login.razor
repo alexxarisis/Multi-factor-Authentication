@@ -1,0 +1,131 @@
+﻿@page "/login"
+@inject HttpClient http
+@inject NavigationManager navManager
+@inject Blazored.LocalStorage.ILocalStorageService localStorage
+@using System.Security.Claims
+
+<PageTitle>Login</PageTitle>
+
+<h1>Login</h1>
+
+<EditForm Model="@user" OnValidSubmit="LoginUser">
+    <div class="form-group">
+        <label for="username">Username</label>
+        <InputText id="username" @bind-Value="user.UserName" class="form-control" />
+    </div>
+    <br />
+    <div class="form-group">
+        <label for="password">Password</label>
+        <InputText id="password" @bind-Value="user.Password" type="password" class="form-control" />
+    </div>
+    <div>
+        <br />
+        <button type="submit" class="btn btn-primary" disabled=@isDisabled>Login</button>
+        <p><br />Don't have an account?</p>
+        <a href="/register" class="col-3">Sign up</a>
+    </div>
+</EditForm>
+
+<p role="status">@debugLog</p>
+
+@code {
+    [CascadingParameter]
+    public Task<AuthenticationState> AuthState { get; set; }
+    private LoginUser user = new LoginUser();
+    private bool isDisabled = false;
+    private string debugLog = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await base.OnInitializedAsync();
+        try
+        {
+            string token = await localStorage.GetItemAsync<string>("Refresh");
+            http.DefaultRequestHeaders.Authorization = new("Bearer", token);
+            using var requestResult = await http.PostAsJsonAsync("auth/refresh", "");
+            if (requestResult.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                return;
+            }
+            var response = await requestResult.Content.ReadFromJsonAsync<Response>();
+            if (response == null)
+            {
+                throw new Exception("Null Response");
+            }
+
+            await StoreTokens(response);
+            await UpdateIdentity(response);
+            navManager.NavigateTo("/");
+        }
+        catch (Exception e)
+        {
+            isDisabled = false;
+            debugLog = e.ToString();
+        }
+    }
+
+    private async Task LoginUser()
+    {
+        try
+        {
+            isDisabled = true;
+            using var requestResult = await http.PostAsJsonAsync("auth/login", user);
+            if (requestResult.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                debugLog = requestResult.StatusCode + "\n" +
+                    await requestResult.Content.ReadAsStringAsync();
+                throw new Exception(debugLog);
+            }
+            if (requestResult.Headers.Location == null)
+            {
+                throw new Exception("Null Location header");
+            }
+            var response = await requestResult.Content.ReadFromJsonAsync<Response>();
+            if (response == null)
+            {
+                throw new Exception("Null Response");
+            }
+
+            await StoreTokens(response);
+            await UpdateIdentity(response);
+            await localStorage.SetItemAsync("username", user.UserName);
+            RedirectPage(requestResult.Headers.Location.ToString());
+        }
+        catch (Exception e)
+        {
+            isDisabled = false;
+            debugLog = e.ToString();
+        }
+    }
+
+    private async Task StoreTokens(Response response)
+    {
+        foreach (KeyValuePair<string, string> token in response.Tokens)
+        {
+            await localStorage.SetItemAsync(token.Key, token.Value);
+        }
+    }
+
+    private async Task UpdateIdentity(Response response)
+    {
+        var authState = await AuthState;
+        var identity = authState.User.Identity as ClaimsIdentity;
+
+        foreach (KeyValuePair<string, string> token in response.Tokens)
+        {
+            identity.AddClaim(new Claim(ClaimTypes.Role, token.Key));
+        }
+    }
+
+    private void RedirectPage(string location)
+    {
+        if (location == "mfa/login")
+        {
+            navManager.NavigateTo("/login/verify");
+        }
+        else if (location == "mfa/init")
+        {
+            navManager.NavigateTo("/mfa/activate");
+        }
+    }
+}

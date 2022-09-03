@@ -1,0 +1,191 @@
+﻿@page "/mfa/verify"
+@inject HttpClient http
+@inject NavigationManager navManager
+@inject Blazored.LocalStorage.ILocalStorageService localStorage
+@using System.Security.Claims
+@implements IAsyncDisposable
+
+@attribute [Authorize(Roles = "MFA Activate")]
+
+@if (recoveryKey == "")
+{
+    <h4>Your account is not secure!</h4>
+    <p>
+        <br />
+        A six-digit one time password has been sent to your email address!
+        <br />
+        <br />
+        <p>One time password expires in:</p>
+        <h3>@timeLeft</h3>
+        <br />
+        This might take a couple of minutes.
+        If you cannot find it, check the spam folder.
+    </p>
+    <EditForm Model="@otp" OnValidSubmit="Activate">
+        <div class="form-group">
+            <label for="password">Enter One-time password:</label>
+            <InputText id="password" @bind-Value="otp.Password"
+                   onkeypress="return (event.charCode !=8 && event.charCode ==0 || (event.charCode >= 48 && event.charCode <= 57))"
+                   class="form-control" maxlength=6 />
+        </div>
+        <div>
+            <p><br /></p>
+            <button type="submit" class="btn btn-primary" disabled=@isDisabled>Verify</button>
+        </div>
+    </EditForm>
+    <p><br /></p>
+    <button type="submit" class="btn btn-primary" @onclick="Back" disabled=@isDisabled>Back</button>
+    <p><br /><br />Lost your code?</p>
+    <button type="submit" class="btn btn-primary" @onclick="ResendCode" disabled=@isDisabled>Send a new one</button>
+    <br />
+    <br />
+    <br />
+    <h5>Step 2 of 3</h5>
+}
+else
+{
+    <p>Your recovery key is:<br />@recoveryKey <br /><br />Make sure to save it somewhere safe!</p>
+    <p><br /></p>
+    <button type="submit" class="btn btn-primary" @onclick="Continue" disabled=@isDisabled>Continue</button>
+    <br />
+    <br />
+    <br />
+    <h5>Step 3 of 3</h5>
+}
+
+<p role="status">@debugLog</p>
+
+@code {
+    [CascadingParameter]
+    public Task<AuthenticationState> AuthState { get; set; }
+
+    private OTPVerification otp = new OTPVerification();
+    private TimeSpan timeLeft = TimeSpan.FromMinutes(10);
+    private RecoveryResponse response;
+    private bool isDisabled = false;
+    private string recoveryKey = "";
+    private string debugLog = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await base.OnInitializedAsync();
+        await RunTimer();
+    }
+
+    private async Task RunTimer()
+    {
+        while (timeLeft > new TimeSpan())
+        {
+            timeLeft = timeLeft.Subtract(new TimeSpan(0, 0, 1));
+            StateHasChanged();
+            await Task.Delay(1000);
+        }
+        navManager.NavigateTo("/");
+    }
+
+    private async Task Activate()
+    {
+        try
+        {
+            isDisabled = true;
+            string token = await localStorage.GetItemAsync<string>("MFA Activate");
+            http.DefaultRequestHeaders.Authorization = new("Bearer", token);
+            using var requestResult = await http.PostAsJsonAsync("mfa/activate", otp.Password);
+
+            if (requestResult.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                debugLog = requestResult.StatusCode + "\n" +
+                    await requestResult.Content.ReadAsStringAsync();
+                throw new Exception(debugLog);
+            }
+
+            response = await requestResult.Content.ReadFromJsonAsync<RecoveryResponse>();
+            if (response == null)
+            {
+                throw new Exception("Null Response");
+            }
+            recoveryKey = response.RecoveryKey;
+            isDisabled = false;
+        }
+        catch (Exception e)
+        {
+            isDisabled = false;
+            debugLog = e.ToString();
+        }
+    }
+
+    private async Task UpdateIdentity(Response response)
+    {
+        var authState = await AuthState;
+        var identity = authState.User.Identity as ClaimsIdentity;
+        foreach (var claim in identity.Claims.ToList())
+        {
+            identity.RemoveClaim(claim);
+        }
+
+        foreach (KeyValuePair<string, string> token in response.Tokens)
+        {
+            identity.AddClaim(new Claim(ClaimTypes.Role, token.Key));
+        }
+    }
+
+    private async Task StoreTokens(Response response)
+    {
+        foreach (KeyValuePair<string, string> token in response.Tokens)
+        {
+            await localStorage.SetItemAsync(token.Key, token.Value);
+        }
+    }
+
+    private void Back()
+    {
+        navManager.NavigateTo("/mfa/activate");
+    }
+
+    private async Task Continue()
+    {
+        await StoreTokens(response);
+        await UpdateIdentity(response);
+        navManager.NavigateTo("/");
+    }
+
+    // Save all, even if user does not press Continue button
+    public async ValueTask DisposeAsync() 
+    {
+        await StoreTokens(response);
+        await UpdateIdentity(response);
+    }
+
+    private async Task ResendCode()
+    {
+        try
+        {
+            isDisabled = true;
+            timeLeft = TimeSpan.FromMinutes(10);
+            string token = await localStorage.GetItemAsync<string>("MFA OTP Refresh");
+            http.DefaultRequestHeaders.Authorization = new("Bearer", token);
+            using var requestResult = await http.PostAsync("mfa/refresh-otp", null);
+
+            if (requestResult.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                debugLog = requestResult.StatusCode + "\n" +
+                    await requestResult.Content.ReadAsStringAsync();
+                throw new Exception(token);
+            }
+
+            var response = await requestResult.Content.ReadFromJsonAsync<Response>();
+            if (response == null)
+            {
+                throw new Exception("Null Response");
+            }
+            await StoreTokens(response);
+            await UpdateIdentity(response);
+            isDisabled = false;
+        }
+        catch (Exception e)
+        {
+            isDisabled = false;
+            debugLog = e.ToString();
+        }
+    }
+}

@@ -1,0 +1,179 @@
+﻿@page "/login/verify"
+@inject HttpClient http
+@inject NavigationManager navManager
+@inject Blazored.LocalStorage.ILocalStorageService localStorage
+@using System.Security.Claims
+
+@attribute [Authorize(Roles = "MFA Access")]
+
+<h5>Because you've turned on two step verification, we need to verify your identity.</h5>
+<p>
+    <br />
+    A six-digit one time password has been sent to your email address!
+    <br />
+    <br />
+<p>One time password expires in:</p>
+<h3>@timeLeft</h3>
+<br />
+    This might take a couple of minutes.
+<br />
+    If you cannot find it, check the spam folder.
+<br />
+<br />
+</p>
+<EditForm Model="@otp" OnValidSubmit="Login" Context="formContext">
+    <div class="form-group">
+        <label for="password">Enter the code:</label>
+        <InputText id="password" @bind-Value="otp.Password"
+                   onkeypress="return (event.charCode !=8 && event.charCode ==0 || (event.charCode >= 48 && event.charCode <= 57))"
+                   class="form-control" maxlength=6 />
+    </div>
+    <div>
+        <p><br /></p>
+        <button type="submit" class="btn btn-primary" disabled=@isDisabled>Verify</button>
+    </div>
+</EditForm>
+
+<p><br /></p>
+<button type="submit" class="btn btn-primary" @onclick="Back" disabled=@isDisabled>Back</button>
+<p><br /><br />Lost your code?</p>
+<button type="submit" class="btn btn-primary" @onclick="ResendCode" disabled=@isDisabled>Send a new one</button>
+
+<p role="status">@debugLog</p>
+
+@code {
+    [CascadingParameter]
+    public Task<AuthenticationState> AuthState { get; set; }
+
+    private OTPVerification otp = new OTPVerification();
+    private TimeSpan timeLeft = TimeSpan.FromMinutes(10);
+    private bool isDisabled = false;
+    private string debugLog = "";
+
+    protected override async Task OnInitializedAsync()
+    {
+        await base.OnInitializedAsync();
+        await RunTimer();
+    }
+
+    private async Task RunTimer()
+    {
+        while (timeLeft > new TimeSpan())
+        {
+            timeLeft = timeLeft.Subtract(new TimeSpan(0, 0, 1));
+            StateHasChanged();
+            await Task.Delay(1000);
+        }
+        ClearIdentity();
+        navManager.NavigateTo("/login");
+    }
+
+    private async Task ClearIdentity()
+    {
+        var authState = await AuthState;
+        var identity = authState.User.Identity as ClaimsIdentity;
+        foreach (var claim in identity.Claims.ToList())
+        {
+            identity.RemoveClaim(claim);
+        }
+    }
+
+    private async Task Login()
+    {
+        try
+        {
+            isDisabled = true;
+            string token = await localStorage.GetItemAsync<string>("MFA Access");
+            http.DefaultRequestHeaders.Authorization = new("Bearer", token);
+            using var requestResult = await http.PostAsJsonAsync("mfa/login", otp.Password);
+
+            if (requestResult.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                debugLog = requestResult.StatusCode + "\n" +
+                    await requestResult.Content.ReadAsStringAsync();
+                throw new Exception(debugLog);
+            }
+
+            var response = await requestResult.Content.ReadFromJsonAsync<Response>();
+            if (response == null)
+            {
+                throw new Exception("Null Response");
+            }
+            await StoreTokens(response);
+            await UpdateIdentity(response);
+            navManager.NavigateTo("/");
+        }
+        catch (Exception e)
+        {
+            isDisabled = false;
+            debugLog = e.ToString();
+        }
+    }
+
+    private async Task UpdateIdentity(Response response)
+    {
+        var authState = await AuthState;
+        var identity = authState.User.Identity as ClaimsIdentity;
+        foreach (var claim in identity.Claims.ToList())
+        {
+            identity.RemoveClaim(claim);
+        }
+
+        foreach (KeyValuePair<string, string> token in response.Tokens)
+        {
+            identity.AddClaim(new Claim(ClaimTypes.Role, token.Key));
+        }
+    }
+
+    private async Task StoreTokens(Response response)
+    {
+        foreach (KeyValuePair<string, string> token in response.Tokens)
+        {
+            await localStorage.SetItemAsync(token.Key, token.Value);
+        }
+    }
+
+    private async Task Back()
+    {
+        var authState = await AuthState;
+        var identity = authState.User.Identity as ClaimsIdentity;
+        foreach (var claim in identity.Claims.ToList())
+        {
+            identity.RemoveClaim(claim);
+        }
+        navManager.NavigateTo("/login");
+    }
+
+    private async Task ResendCode()
+    {
+        try
+        {
+            isDisabled = true;
+            timeLeft = TimeSpan.FromMinutes(10);
+            string token = await localStorage.GetItemAsync<string>("MFA OTP Refresh");
+            http.DefaultRequestHeaders.Authorization = new("Bearer", token);
+            using var requestResult = await http.PostAsync("mfa/refresh-otp", null);
+
+            if (requestResult.StatusCode != System.Net.HttpStatusCode.OK)
+            {
+                debugLog = requestResult.StatusCode + "\n" +
+                    await requestResult.Content.ReadAsStringAsync();
+                throw new Exception(token);
+            }
+
+            var response = await requestResult.Content.ReadFromJsonAsync<Response>();
+            if (response == null)
+            {
+                throw new Exception("Null Response");
+            }
+            await StoreTokens(response);
+            await UpdateIdentity(response);
+            isDisabled = false;
+        }
+        catch (Exception e)
+        {
+            isDisabled = false;
+            debugLog = e.ToString();
+        }
+    }
+}
